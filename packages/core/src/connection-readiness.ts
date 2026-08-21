@@ -15,8 +15,9 @@
  *   - effective model exists (caller's `requestedModel` if provided,
  *     otherwise `connection.defaultModel`)
  *   - effective model is enabled by the user
- *   - effective model is in `connection.models` (when that list is
- *     enumerated)
+ *   - effective model is in `connection.models`, but only when that list is a
+ *     live one — see `isConnectionReady` for why a provider without a
+ *     model-list endpoint cannot supply one
  *
  * Product readiness projections must call this helper rather than
  * reimplementing the criteria.
@@ -28,6 +29,7 @@ import {
   connectionEnabledModelIds,
   providerAuthRequiresSecret,
   providerDefaultsOf,
+  authorizeConnectionModel,
   type LlmConnection,
 } from './llm-connections.js';
 import { isModelExplicitlyUnsupportedForChat } from './model-catalog.js';
@@ -91,8 +93,10 @@ export interface IsConnectionReadyInput {
  *   4. effective model is empty/missing → `missing_model`
  *   5. no models are enabled → `empty_model_list`
  *   6. effective model is not enabled → `model_not_enabled`
- *   7. `connection.models` is enumerated but empty → `empty_model_list`
- *   8. effective model is not in `connection.models` → `model_not_enabled`
+ *   7. the provider has a model-list endpoint and `connection.models` is
+ *      enumerated but empty → `empty_model_list`
+ *   8. the provider has a model-list endpoint and the effective model is not in
+ *      `connection.models` → `model_not_enabled`
  *   9. effective model is explicitly not chat-capable → `model_not_chat_capable`
  *
  * "Effective model" = `requestedModel ?? connection.defaultModel`.
@@ -113,29 +117,19 @@ export function isConnectionReady(input: IsConnectionReadyInput): IsConnectionRe
   if (!model) {
     return { ready: false, reason: 'missing_model' };
   }
-  const enabledModelIds = new Set(connectionEnabledModelIds(connection));
-  if (enabledModelIds.size === 0) {
+  if (connectionEnabledModelIds(connection).length === 0) {
     return { ready: false, reason: 'empty_model_list' };
   }
-  if (!enabledModelIds.has(model)) {
+  const authorized = authorizeConnectionModel(connection, model);
+  if (!authorized) {
     return { ready: false, reason: 'model_not_enabled' };
   }
-  if (connection.models) {
-    const enabled = new Map<string, (typeof connection.models)[number]>();
-    for (const entry of connection.models) {
-      const id = entry.id.trim();
-      if (id) enabled.set(id, entry);
-    }
-    if (enabled.size === 0) {
-      return { ready: false, reason: 'empty_model_list' };
-    }
-    const modelEntry = enabled.get(model);
-    if (!modelEntry) {
-      return { ready: false, reason: 'model_not_enabled' };
-    }
-    if (isModelExplicitlyUnsupportedForChat(modelEntry)) {
-      return { ready: false, reason: 'model_not_chat_capable' };
-    }
+  // Capabilities are facts wherever they came from: a row that marks a model
+  // image-only rules it out of chat regardless of which catalog carried it.
+  // Absence from a catalog is not a capability and is not checked — the
+  // provider answers for its own account (#1584).
+  if (isModelExplicitlyUnsupportedForChat(authorized)) {
+    return { ready: false, reason: 'model_not_chat_capable' };
   }
   return { ready: true, model };
 }
